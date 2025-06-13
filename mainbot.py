@@ -12,7 +12,7 @@ from selenium_stealth import stealth
 # =============== TELEGRAM BOT CONFIG ===============
 API_ID = "24235215" # ⚠️ Replace with your own
 API_HASH = "f344f64fc2e54099684b09273a4d445b"
-BOT_TOKEN = "your_bot_token"
+BOT_TOKEN = "7566331132:AAHVsipJXKijZHBk1tXvtiMPZqc7ll-OHTA"
 
 app = Client("beast_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
