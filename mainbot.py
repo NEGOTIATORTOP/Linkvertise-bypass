@@ -1,187 +1,321 @@
-import random
+import os
+import sys
 import time
+import random
+import asyncio
+import logging
 import datetime
+import threading
+import requests
+
 from pyrogram import Client, filters
 from pyrogram.types import Message
-import undetected_chromedriver as uc
+from telethon import TelegramClient, events
+
+from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
-from fake_useragent import UserAgent
-from selenium_stealth import stealth
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.keys import Keys
 
-# =============== TELEGRAM BOT CONFIG ===============
-API_ID = "24235215" # ⚠️ Replace with your own
+from queue import Queue
+
+# ======================= CONFIGURATION ==========================
+API_ID = 24235215
 API_HASH = "f344f64fc2e54099684b09273a4d445b"
 BOT_TOKEN = "7566331132:AAHVsipJXKijZHBk1tXvtiMPZqc7ll-OHTA"
 
-app = Client("beast_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+PROXY_LIST_FILE = "proxies.txt"
+USER_AGENT_LIST = [
+    # A handful of modern UA strings for humanization
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 14; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Mobile Safari/537.36"
+]
 
-# =============== GET RANDOM PROXY ===============
-def get_random_proxy():
-    try:
-        with open("proxies.txt", "r") as f:
-            proxies = [line.strip() for line in f if line.strip()]
-        if not proxies:
-            return None
-        return random.choice(proxies)
-    except Exception as e:
-        print(f"[❌] Proxy error: {str(e)}")
-        return None
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s]: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 
-# =============== FAKE HUMAN INTERACTION ===============
-def simulate_human_behavior(driver):
-    try:
+# ======================= PROXY MANAGER ==========================
+class ProxyManager:
+    def __init__(self, filename):
+        self.filename = filename
+        self.lock = threading.Lock()
+        self.proxies = self._load_proxies()
+
+    def _load_proxies(self):
+        logging.info("Loading proxies...")
+        proxies = []
+        if os.path.exists(self.filename):
+            with open(self.filename, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        proxies.append(line)
+        logging.info(f"{len(proxies)} proxies loaded.")
+        return proxies
+
+    def get_random_proxy(self):
+        with self.lock:
+            if not self.proxies:
+                return None
+            return random.choice(self.proxies)
+
+    def reload(self):
+        with self.lock:
+            self.proxies = self._load_proxies()
+
+    def get_count(self):
+        with self.lock:
+            return len(self.proxies)
+
+proxy_manager = ProxyManager(PROXY_LIST_FILE)
+
+# ======================= USER AGENT MANAGER =====================
+def get_random_user_agent():
+    return random.choice(USER_AGENT_LIST)
+
+# ======================= BROWSER AUTOMATION =====================
+class HumanLikeBrowser:
+    def __init__(self, url, proxy=None, headless=True, timeout=40):
+        self.url = url
+        self.proxy = proxy
+        self.headless = headless
+        self.timeout = timeout
+        self.driver = None
+
+    def _get_chrome_options(self):
+        options = Options()
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument(f"user-agent={get_random_user_agent()}")
+        options.add_argument("--disable-infobars")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--window-size={0},{1}".format(
+            random.randint(1050, 1920), random.randint(700, 1280)
+        ))
+        if self.headless:
+            options.add_argument("--headless=new")
+        # Proxy support
+        if self.proxy:
+            if self.proxy.startswith("socks"):
+                options.add_argument(f"--proxy-server={self.proxy}")
+            else:
+                options.add_argument(f"--proxy-server=http://{self.proxy}")
+        return options
+
+    def _init_driver(self):
+        # ChromeDriver must be in PATH for Termux (can use chromium package)
+        try:
+            options = self._get_chrome_options()
+            self.driver = webdriver.Chrome(options=options)
+            self.driver.set_page_load_timeout(self.timeout)
+        except Exception as e:
+            logging.error(f"Failed to initialize webdriver: {e}")
+            raise
+
+    def _simulate_human_behavior(self):
+        driver = self.driver
         actions = ActionChains(driver)
-        # Move mouse in random pattern
-        for _ in range(random.randint(2, 5)):
-            x_offset = random.randint(50, 250)
-            y_offset = random.randint(20, 200)
-            actions.move_by_offset(x_offset, y_offset).perform()
-            time.sleep(random.uniform(0.8, 1.8))
-        # Randomly click on page elements
-        elements = driver.find_elements(By.XPATH, "//*")
-        random.shuffle(elements)
-        for el in elements[:random.randint(1, 5)]:
+        width = driver.get_window_size()['width']
+        height = driver.get_window_size()['height']
+        # Mouse movement: random patterns
+        for _ in range(random.randint(4, 10)):
+            x = random.randint(0, width - 20)
+            y = random.randint(0, height - 20)
             try:
-                actions.move_to_element(el).click().perform()
-                time.sleep(random.uniform(0.3, 1.2))
+                actions.move_by_offset(x, y).perform()
+            except Exception:
+                pass
+            time.sleep(random.uniform(0.2, 0.9))
+        # Random scrolls
+        for _ in range(random.randint(2, 5)):
+            scroll_amount = random.randint(50, height)
+            driver.execute_script(f"window.scrollBy(0, {scroll_amount});")
+            time.sleep(random.uniform(0.3, 1.1))
+        driver.execute_script("window.scrollTo(0, 0);")
+        # Click random elements
+        all_elems = driver.find_elements(By.XPATH, "//*")
+        random.shuffle(all_elems)
+        clicked = 0
+        for elem in all_elems:
+            if clicked >= random.randint(1, 4):
+                break
+            try:
+                actions.move_to_element(elem).click().perform()
+                clicked += 1
+                time.sleep(random.uniform(0.2, 0.6))
             except Exception:
                 continue
-        # Scroll page in distinct steps
-        scroll_heights = [0.15, 0.3, 0.5, 0.7, 1.0]
-        for level in scroll_heights:
-            driver.execute_script(f"window.scrollTo(0, document.body.scrollHeight * {level});")
-            time.sleep(random.uniform(1.3, 2.8))
-        driver.execute_script("window.scrollTo(0, 0);")
-        time.sleep(random.uniform(0.8, 1.5))
-    except Exception as e:
-        print(f"[⚠️] Human simulation error: {str(e)}")
-
-# =============== ANTI-DETECTION PATCH ===============
-def apply_stealth_settings(driver, ua):
-    try:
-        stealth(
-            driver,
-            languages=["en-US", "en"],
-            vendor="Google Inc.",
-            platform="Win32",
-            webgl_vendor="Intel Inc.",
-            renderer="Intel Iris OpenGL Engine",
-            fix_hairline=True,
-            run_on_insecure_origins=False
-        )
-        driver.execute_cdp_cmd('Network.setUserAgentOverride', {"userAgent": ua})
-        width = random.randint(1000, 1600)
-        height = random.randint(700, 1200)
-        driver.set_window_size(width, height)
-    except Exception as e:
-        print(f"[⚠️] Stealth error: {str(e)}")
-
-# =============== CAPTCHA BYPASS (DEMO PLACEHOLDER) ===============
-def try_solve_captcha(driver):
-    # Placeholder: Integrate with a captcha solving service like 2captcha, anti-captcha, etc.
-    # For now, just detect if there's a known captcha and pause
-    iframes = driver.find_elements(By.TAG_NAME, "iframe")
-    for iframe in iframes:
-        src = iframe.get_attribute("src")
-        if src and ("recaptcha" in src or "hcaptcha" in src):
-            print("[⚠️] CAPTCHA detected! Manual solve required or integrate captcha solver.")
-            time.sleep(random.uniform(10, 20))  # Simulate waiting for manual or API solve
-
-# =============== LINK VISIT CORE ===============
-def visit_link(url):
-    proxy = get_random_proxy()
-    if not proxy:
-        print("[❌] No proxy found.")
-        return False
-
-    ua = UserAgent().random
-    options = uc.ChromeOptions()
-    options.add_argument(f"--proxy-server=http://{proxy}")
-    options.add_argument(f"user-agent={ua}")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--headless=new")
-
-    driver = None
-    try:
-        driver = uc.Chrome(options=options, use_subprocess=True)
-        driver.set_page_load_timeout(30)
-        driver.get(url)
-        time.sleep(random.uniform(1, 2.5))
-
-        apply_stealth_settings(driver, ua)
-        time.sleep(random.uniform(2, 4))
-
-        try_solve_captcha(driver)
-        simulate_human_behavior(driver)
-        time.sleep(random.uniform(2.5, 5.5))
-
-        driver.quit()
-        return True
-    except Exception as e:
-        print(f"[ERROR] Visit failed: {str(e)}")
+        # Random keyboard input (no submit)
+        body = None
         try:
-            if driver: driver.quit()
-        except: pass
+            body = driver.find_element(By.TAG_NAME, "body")
+        except Exception:
+            pass
+        if body:
+            for _ in range(random.randint(1, 3)):
+                key = random.choice([Keys.ARROW_DOWN, Keys.ARROW_RIGHT, Keys.ARROW_LEFT, Keys.ARROW_UP])
+                body.send_keys(key)
+                time.sleep(random.uniform(0.1, 0.5))
+
+    def _detect_captcha(self):
+        driver = self.driver
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        for iframe in iframes:
+            src = iframe.get_attribute("src")
+            if src and ("recaptcha" in src or "hcaptcha" in src):
+                return True
         return False
 
-# =============== COMMAND: /start ===============
+    def _wait_for_captcha(self, max_wait=40):
+        # Placeholder for real CAPTCHA solving: here we just wait & alert
+        logging.info("CAPTCHA detected! Waiting for manual completion or solver API (not integrated).")
+        waited = 0
+        while self._detect_captcha() and waited < max_wait:
+            time.sleep(3)
+            waited += 3
+
+    def perform(self):
+        try:
+            self._init_driver()
+            self.driver.get(self.url)
+            time.sleep(random.uniform(2, 4))
+            # Check for CAPTCHA
+            if self._detect_captcha():
+                self._wait_for_captcha()
+            # Simulate human action
+            self._simulate_human_behavior()
+            # Random wait after actions
+            time.sleep(random.uniform(1.5, 3.5))
+            return True, "Impression completed"
+        except Exception as e:
+            logging.error(f"Browser automation failed: {e}")
+            return False, str(e)
+        finally:
+            try:
+                if self.driver:
+                    self.driver.quit()
+            except Exception:
+                pass
+
+# ====================== TASK QUEUE AND WORKER ====================
+class Task:
+    def __init__(self, url, user_id, chat_id):
+        self.url = url
+        self.user_id = user_id
+        self.chat_id = chat_id
+        self.timestamp = datetime.datetime.utcnow()
+
+class BotTaskQueue:
+    def __init__(self):
+        self.queue = Queue()
+        self.active = True
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def _worker(self):
+        while self.active:
+            task = self.queue.get()
+            if task is None:
+                break
+            logging.info(f"Processing task: {task.url} for user {task.user_id}")
+            proxy = proxy_manager.get_random_proxy()
+            browser = HumanLikeBrowser(task.url, proxy=proxy, headless=True)
+            success, msg = browser.perform()
+            asyncio.run(send_task_result(task, success, msg))
+            self.queue.task_done()
+
+    def add_task(self, task):
+        self.queue.put(task)
+
+    def stop(self):
+        self.active = False
+        self.queue.put(None)
+
+task_queue = BotTaskQueue()
+
+# ====================== TELEGRAM BOT CORE ========================
+app = Client("beast_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+async def send_task_result(task, success, msg):
+    try:
+        if success:
+            await app.send_message(task.chat_id,
+                f"✅ [Impression Complete] Link visited successfully at {datetime.datetime.now().strftime('%H:%M:%S')}!\n\n📈 {msg}"
+            )
+        else:
+            await app.send_message(task.chat_id,
+                f"❌ [Failed] Link impression failed: {msg}"
+            )
+    except Exception as e:
+        logging.error(f"Failed to send Telegram message: {e}")
+
+# =============== BOT COMMANDS ===============
+
 @app.on_message(filters.command("start"))
-async def start(client, message: Message):
+async def start_cmd(client, message: Message):
     await message.reply(
-        "👋 Welcome to the *BEAST LINK BOT v3.0* (Advanced Stealth).\n\n"
-        "🚀 This bot auto-clicks Linkvertise links with rotating proxies, true humanization, and stealth bypass.\n"
-        "🔒 Undetectable: patched browser fingerprint, random mouse/clicks, rotating UA & proxy, and CAPTCHA ready!\n\n"
-        "🧪 Use /link <url> to start.\n"
-        "ℹ️ Use /help for more commands."
+        "👋 Welcome to *BEAST LINK BOT v4.0* (Ultra Stealth).\n\n"
+        "🚀 This bot automates Linkvertise impressions using rotating proxies, advanced browser fingerprinting, and deep human simulation.\n"
+        "🛡️ Cross-platform, optimized for Termux.\n\n"
+        "📖 Use /help for commands.\n"
+        "🤖 Use /link <url> to start an impression."
     )
 
-# =============== COMMAND: /help ===============
 @app.on_message(filters.command("help"))
-async def help_command(client, message: Message):
+async def help_cmd(client, message: Message):
     await message.reply(
         "**🛠 Beast Bot Commands:**\n"
-        "`/link <linkvertise_url>` – Start automated visit\n"
-        "`/status` – Show total proxies available\n"
-        "`/start` – Welcome message\n"
+        "`/link <linkvertise_url>` – Start a new impression\n"
+        "`/status` – System health and proxy count\n"
+        "`/reloadproxies` – Reload proxies from file\n"
+        "`/start` – Start message\n"
         "`/help` – This help panel"
     )
 
-# =============== COMMAND: /status ===============
 @app.on_message(filters.command("status"))
-async def status(client, message: Message):
-    try:
-        with open("proxies.txt", "r") as f:
-            count = len([line for line in f if line.strip()])
-        await message.reply(f"🔌 Total proxies loaded: {count}\n🧠 System healthy. Ready to boost impressions.")
-    except Exception as e:
-        await message.reply("⚠️ Error loading proxies.txt. Make sure the file exists.")
+async def status_cmd(client, message: Message):
+    count = proxy_manager.get_count()
+    await message.reply(
+        f"🔌 Total proxies loaded: {count}\n"
+        f"🧠 System healthy. Ready for impression automation."
+    )
 
-# =============== COMMAND: /link ===============
+@app.on_message(filters.command("reloadproxies"))
+async def reloadproxies_cmd(client, message: Message):
+    proxy_manager.reload()
+    count = proxy_manager.get_count()
+    await message.reply(f"♻️ Proxies reloaded. Now loaded: {count}")
+
 @app.on_message(filters.command("link"))
-async def handle_link(client, message: Message):
-    try:
-        parts = message.text.strip().split(" ")
-        if len(parts) < 2:
-            await message.reply("❌ Please send a link like:\n`/link https://linkvertise.com/...`")
-            return
-        url = parts[1]
-        now = datetime.datetime.now().strftime("%H:%M:%S")
-        await message.reply(f"🧠 [{now}] Beast is executing...\n\n🌐 Visiting: `{url}`\n⏳ Using rotating proxies, user-agent, and human actions...")
+async def link_cmd(client, message: Message):
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("❌ Usage: `/link <linkvertise_url>`")
+        return
+    url = args[1]
+    # Validate Linkvertise domain
+    if not ("linkvertise.com" in url or "link-to.net" in url):
+        await message.reply("❌ Only Linkvertise URLs are supported.")
+        return
+    now = datetime.datetime.now().strftime("%H:%M:%S")
+    await message.reply(f"🧠 [{now}] Task queued for: `{url}`\n\n🌐 Rotating proxies, human browser, and smart fingerprinting...")
+    # Queue the task for background processing
+    task = Task(url, message.from_user.id, message.chat.id)
+    task_queue.add_task(task)
 
-        result = visit_link(url)
-        if result:
-            await message.reply("✅ Link visited successfully!\n📈 Impressions added.\n🤖 Fully undetected & humanized!")
-        else:
-            await message.reply("❌ Link visit failed.\nCheck proxy/link or try again later.")
-
-    except Exception as e:
-        await message.reply(f"⚠️ Unexpected error: {str(e)}")
-
-# =============== RUN THE BOT ===============
+# ====================== BOT RUNNER =============================
 if __name__ == "__main__":
-    print("🚀 BEAST BOT v3.0 Advanced Stealth Running...")
+    print("🚀 BEAST LINK BOT v4.0 (Ultra Stealth) Running on Termux...")
     app.run()
+
+    # Graceful shutdown
+    task_queue.stop()
